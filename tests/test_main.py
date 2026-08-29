@@ -1,5 +1,6 @@
 import sys
 import unittest
+from http.client import RemoteDisconnected
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
@@ -10,6 +11,11 @@ import main  # noqa: E402
 
 
 class QuotaParserTests(unittest.TestCase):
+    def test_network_disconnect_becomes_a_retryable_data_error(self):
+        with patch.object(main, "urlopen", side_effect=RemoteDisconnected("source closed connection")):
+            with self.assertRaises(main.DataSourceError):
+                main.request_text("https://example.test/notice", retries=1)
+
     def test_limited_announcement_extracts_limit(self):
         content = """
         <p>自2026年8月20日起，投资人通过各代销机构申购本基金，
