@@ -65,12 +65,13 @@ class DiscoveryTests(unittest.TestCase):
     def test_discovery_keeps_overseas_fund_without_qdii_label_and_excludes_etf(self):
         settings = {
             "sources": {"fund_code_table": {"url": "https://example.test/funds", "referer": "https://example.test/"}},
-            "universe": {"name_pattern": "纳斯达克100", "exclude_codes": [], "pinned_funds": []},
+            "universe": {"name_pattern": "(?:纳斯达克|纳指)100", "exclude_codes": [], "pinned_funds": []},
             "safety": {"min_fund_count": 1},
         }
         source = '''var r = [
           ["000834","dc","大成纳斯达克100ETF联接(QDII)A","指数型-海外股票","dc"],
           ["160213","gt","国泰纳斯达克100指数","指数型-海外股票","gt"],
+          ["021778","gf","广发纳指100ETF联接(QDII)人民币F","指数型-海外股票","gf"],
           ["513300","hx","华夏纳斯达克100ETF(QDII)","指数型-海外股票","hx"],
           ["000001","x","普通基金","混合型-偏股","x"]
         ];'''
@@ -78,8 +79,28 @@ class DiscoveryTests(unittest.TestCase):
             funds = main.discover_funds(settings)
         self.assertEqual(
             {item.code: item.name for item in funds},
-            {"000834": "大成纳斯达克100ETF联接(QDII)A", "160213": "国泰纳斯达克100指数"},
+            {
+                "000834": "大成纳斯达克100ETF联接(QDII)A",
+                "160213": "国泰纳斯达克100指数",
+                "021778": "广发纳指100ETF联接(QDII)人民币F",
+            },
         )
+
+    def test_discovery_fails_closed_if_a_required_fund_disappears(self):
+        settings = {
+            "sources": {"fund_code_table": {"url": "https://example.test/funds", "referer": "https://example.test/"}},
+            "universe": {
+                "name_pattern": "(?:纳斯达克|纳指)100",
+                "exclude_codes": [],
+                "pinned_funds": [],
+                "required_codes": ["160213"],
+            },
+            "safety": {"min_fund_count": 1},
+        }
+        source = 'var r = [["000834","dc","大成纳斯达克100ETF联接(QDII)A","指数型-海外股票","dc"]];'
+        with patch.object(main, "request_text", return_value=source):
+            with self.assertRaisesRegex(main.DataSourceError, "160213"):
+                main.discover_funds(settings)
 
 
 class SnapshotAndPresentationTests(unittest.TestCase):
