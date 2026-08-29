@@ -18,7 +18,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, fields, replace
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -79,6 +79,10 @@ class FundState:
     checked_at: str
     confidence: str
     note: str | None = None
+    reference_status: str = "unknown"
+    reference_title: str | None = None
+    reference_date: str | None = None
+    reference_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -149,6 +153,82 @@ def plain_text(value: str) -> str:
     text = re.sub(r"<[^>]+>", " ", value)
     text = html.unescape(text).replace("\u3000", " ")
     return re.sub(r"\s+", " ", text).strip()
+
+
+def parse_json_or_jsonp(raw: str) -> Any:
+    body = raw.strip()
+    if body.startswith("{") or body.startswith("["):
+        return json.loads(body)
+    match = re.search(r"^[^(]+\((.*)\)\s*;?\s*$", body, flags=re.S)
+    if not match:
+        raise DataSourceError("数据源返回了无法识别的格式")
+    return json.loads(match.group(1))
+
+
+def get_field(row: dict[str, Any], *keys: str) -> str | None:
+    for key in keys:
+        value = row.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return None
+
+
+def is_relevant_reference_title(title: str) -> bool:
+    """只把明确涉及申购或定投变更的公告用于背景核验。"""
+    compact = normalise_name(title)
+    has_business = any(token in compact for token in ("申购", "定期定额", "定投"))
+    has_change = any(token in compact for token in ("暂停", "恢复", "调整", "限制", "开放"))
+    is_holiday_only = any(token in compact for token in ("节假日", "非交易日", "境外主要投资场所"))
+    return has_business and has_change and not is_holiday_only
+
+
+def is_direct_only_reference(title: str) -> bool:
+    """直销专属公告不能用来质疑或覆盖代销渠道的当前页面。"""
+    compact = normalise_name(title)
+    has_direct = "直销" in compact
+    has_broader_scope = any(token in compact for token in ("代销", "销售机构", "所有渠道"))
+    return has_direct and not has_broader_scope
+
+
+def status_from_reference_title(title: str) -> str:
+    """公告仅按标题的当前动作归类，避免正文引用历史状态造成反向误判。"""
+    compact = normalise_name(title)
+    if "暂停大额申购" in compact or any(token in compact for token in ("限制大额申购", "调整大额申购", "限制申购金额")):
+        return "limited"
+    if "暂停" in compact and "申购" in compact:
+        return "suspended"
+    if "恢复" in compact and any(token in compact for token in ("申购", "定期定额", "定投")):
+        return "open"
+    return "unknown"
+
+
+def announcement_reference_for(fund: Fund, settings: dict[str, Any]) -> tuple[str, str | None, str | None, str | None]:
+    """读取最近一条适用于非直销口径的公告，作为来源独立的背景核验。"""
+    source = settings["sources"]["announcement_list"]
+    url = source["url"].format(code=fund.code, timestamp=int(time.time() * 1000))
+    raw = request_text(url, headers={"Referer": source["referer"].format(code=fund.code)})
+    payload = parse_json_or_jsonp(raw)
+    if not isinstance(payload, dict):
+        raise DataSourceError("公告列表格式异常")
+    rows = payload.get("Data", payload.get("data", []))
+    if isinstance(rows, dict):
+        rows = rows.get("List", rows.get("list", []))
+    if not isinstance(rows, list):
+        raise DataSourceError("公告列表没有可用条目")
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        title = get_field(row, "TITLE", "title", "NoticeTitle") or ""
+        if not is_relevant_reference_title(title) or is_direct_only_reference(title):
+            continue
+        status = status_from_reference_title(title)
+        if status == "unknown":
+            continue
+        announcement_id = get_field(row, "ID", "id", "ArtCode", "art_code")
+        published_at = get_field(row, "PUBLISHDATEDesc", "PUBLISHDATE", "publishDate", "NOTICE_DATE")
+        page = settings["sources"]["announcement_page"].format(announcement_id=announcement_id) if announcement_id else None
+        return status, title, published_at, page
+    return "unknown", None, None, None
 
 
 def discover_funds(settings: dict[str, Any]) -> list[Fund]:
@@ -301,6 +381,23 @@ def fetch_tiantian_state(fund: Fund, settings: dict[str, Any], checked_at: str) 
     )
 
 
+def fetch_fund_state(fund: Fund, settings: dict[str, Any], checked_at: str) -> FundState:
+    """主渠道为天天基金；公告仅为独立的背景核验，不影响主渠道结论。"""
+    state = fetch_tiantian_state(fund, settings, checked_at)
+    try:
+        reference_status, reference_title, reference_date, reference_url = announcement_reference_for(fund, settings)
+    except DataSourceError as exc:
+        logging.warning("%s 公告交叉核验暂不可用：%s", fund.code, exc)
+        return state
+    return replace(
+        state,
+        reference_status=reference_status,
+        reference_title=reference_title,
+        reference_date=reference_date,
+        reference_url=reference_url,
+    )
+
+
 def serialise_state(item: FundState) -> dict[str, Any]:
     return asdict(item)
 
@@ -333,6 +430,8 @@ def compare_snapshots(previous: Iterable[FundState], current: Iterable[FundState
             changes.append(Change(after.code, after.name, "limit", before, after))
         elif before.dca_status != after.dca_status:
             changes.append(Change(after.code, after.name, "dca", before, after))
+        elif has_reference_conflict(before) != has_reference_conflict(after):
+            changes.append(Change(after.code, after.name, "reference", before, after))
     return changes
 
 
@@ -352,6 +451,19 @@ def display_limit(item: FundState) -> str:
     return item.limit or "待核验"
 
 
+def reference_label(item: FundState) -> str:
+    """只描述是否与公告背景一致，绝不以公告替换渠道页面状态。"""
+    if item.reference_status == "unknown":
+        return "公告待核验"
+    if item.reference_status == item.status:
+        return "公告一致"
+    return "公告有差异"
+
+
+def has_reference_conflict(item: FundState) -> bool:
+    return item.reference_status != "unknown" and item.reference_status != item.status
+
+
 def change_label(change: Change) -> str:
     before = change.before
     after = change.after
@@ -365,6 +477,8 @@ def change_label(change: Change) -> str:
         return f"{display_limit(before) if before else '—'} → {display_limit(after)}"
     if change.kind == "dca":
         return f"定投：{before.dca_status if before else '待核验'} → {after.dca_status}"
+    if change.kind == "reference":
+        return f"公告核验：{reference_label(before) if before else '待核验'} → {reference_label(after)}"
     return "状态更新，请查看渠道页面"
 
 
@@ -378,9 +492,9 @@ def product_name(name: str) -> str:
 
 
 def group_for_display(states: list[FundState]) -> list[tuple[str, list[FundState]]]:
-    groups: dict[tuple[str, str, str | None, str, str], list[FundState]] = {}
+    groups: dict[tuple[str, str, str | None, str, str, str], list[FundState]] = {}
     for item in states:
-        key = (product_name(item.name), item.status, item.limit, item.dca_status, item.channel)
+        key = (product_name(item.name), item.status, item.limit, item.dca_status, item.channel, item.reference_status)
         groups.setdefault(key, []).append(item)
     order = {"open": 0, "limited": 1, "suspended": 2, "unknown": 3}
     return sorted(((key[0], members) for key, members in groups.items()), key=lambda item: (order.get(item[1][0].status, 4), item[0]))
@@ -391,6 +505,11 @@ def build_message_html(
 ) -> tuple[str, str]:
     grouped = group_for_display(states)
     counts = {key: sum(item.status == key for item in states) for key in STATUS_META}
+    reference_counts = {
+        "consistent": sum(item.reference_status != "unknown" and item.reference_status == item.status for item in states),
+        "conflict": sum(has_reference_conflict(item) for item in states),
+        "unknown": sum(item.reference_status == "unknown" for item in states),
+    }
     title_prefix = "首次建档" if initial else "每日汇总" if is_digest else "状态变动"
     title = f"纳指100公开渠道｜{title_prefix}"
     date_label = now.strftime("%Y年%m月%d日 %H:%M")
@@ -417,12 +536,13 @@ def build_message_html(
         codes = "、".join(member.code for member in members)
         shares = f"{len(members)} 份额" if len(members) > 1 else "1 份额"
         notes = sorted({member.note for member in members if member.note})
+        reference_note = reference_label(item)
         note = f'<div style="margin-top:3px;color:#9b6b18;font-size:11px;line-height:16px;">{html.escape("；".join(notes))}</div>' if notes else ""
         table_rows.append(
             '<tr>'
             '<td style="padding:13px 8px 13px 0;border-bottom:1px solid #e9eef5;vertical-align:top;">'
             f'<div style="font-weight:760;color:#182740;font-size:13px;line-height:19px;">{html.escape(display_name)}</div>'
-            f'<div style="margin-top:3px;color:#8290a5;font-size:11px;line-height:17px;">{html.escape(shares)} · {html.escape(codes)} · {html.escape(item.channel)}</div>{note}'
+            f'<div style="margin-top:3px;color:#8290a5;font-size:11px;line-height:17px;">{html.escape(shares)} · {html.escape(codes)} · {html.escape(item.channel)} · {html.escape(reference_note)}</div>{note}'
             '</td>'
             '<td style="padding:13px 5px;border-bottom:1px solid #e9eef5;vertical-align:top;text-align:center;white-space:nowrap;">'
             f'{status_badge(item.status)}<div style="margin-top:5px;color:#697993;font-size:11px;">定投：{html.escape(item.dca_status)}</div>'
@@ -448,6 +568,7 @@ def build_message_html(
   </div>
   <div style="padding:18px 18px 22px;border:1px solid #e3eaf4;border-top:0;border-radius:0 0 16px 16px;">
     <div style="padding:12px 14px;border-radius:10px;background:#f4f7fc;color:#50617b;font-size:13px;line-height:21px;">{summary}</div>
+    <div style="margin-top:8px;color:#718199;font-size:11px;line-height:17px;">公告交叉核验：一致 {reference_counts["consistent"]} · 有差异 {reference_counts["conflict"]} · 待核验 {reference_counts["unknown"]}</div>
     {change_block}
     <div style="margin:16px 0 8px;font-size:13px;font-weight:800;color:#26364f;">完整清单</div>
     <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;table-layout:fixed;">
@@ -459,7 +580,7 @@ def build_message_html(
       <tbody>{''.join(table_rows)}</tbody>
     </table>
     <div style="margin-top:15px;padding-top:12px;border-top:1px solid #e9eef5;color:#7f8ea4;font-size:11px;line-height:18px;">
-      数据来自天天基金公开交易详情页；状态、定投和限额均按该渠道页面展示。支付宝、理财通及其他未接入渠道不在本卡中推断。暂停申购时，即使网页仍保留历史限额数字，也会显示“—”。<br>
+      主状态来自天天基金公开交易详情页；基金公司适用公告只用于交叉核验，不会覆盖渠道页面。支付宝、理财通及其他未接入渠道不在本卡中推断。暂停申购时，即使网页仍保留历史限额数字，也会显示“—”。<br>
       本消息只作公开信息提醒，不构成投资建议。
     </div>
   </div>
@@ -473,6 +594,11 @@ def build_compact_message_html(states: list[FundState], changes: list[Change], n
     """当完整视觉卡片过长时，换用保留全量信息的紧凑版。"""
     grouped = group_for_display(states)
     counts = {key: sum(item.status == key for item in states) for key in STATUS_META}
+    reference_counts = {
+        "consistent": sum(item.reference_status != "unknown" and item.reference_status == item.status for item in states),
+        "conflict": sum(has_reference_conflict(item) for item in states),
+        "unknown": sum(item.reference_status == "unknown" for item in states),
+    }
     change_text = "；".join(f"{change.name}：{change_label(change)}" for change in changes[:6])
     change_block = (
         f'<div style="margin:10px 0;padding:8px 10px;background:#f3f7ff;color:#36558f;font-size:12px;line-height:18px;border-radius:7px;">变化：{html.escape(change_text)}</div>'
@@ -487,7 +613,7 @@ def build_compact_message_html(states: list[FundState], changes: list[Change], n
         rows.append(
             '<tr><td style="padding:8px 5px 8px 0;border-bottom:1px solid #edf0f4;vertical-align:top;">'
             f'<b style="font-size:12px;color:#1b2942;">{html.escape(display_name)}</b><br>'
-            f'<span style="font-size:10px;color:#7d899d;">{html.escape(codes)} · 天天基金</span>'
+            f'<span style="font-size:10px;color:#7d899d;">{html.escape(codes)} · 天天基金 · {html.escape(reference_label(item))}</span>'
             '</td><td style="padding:8px 0;border-bottom:1px solid #edf0f4;text-align:right;vertical-align:top;white-space:nowrap;">'
             f'<b style="font-size:11px;color:#40516e;">{label}</b><br>'
             f'<span style="font-size:11px;color:#172844;">定投 {html.escape(item.dca_status)} · {html.escape(display_limit(item))}</span>'
@@ -501,9 +627,10 @@ def build_compact_message_html(states: list[FundState], changes: list[Change], n
   </div>
   <div style="padding:13px;border:1px solid #e3e8f0;border-top:0;border-radius:0 0 12px 12px;">
     <div style="padding:8px 10px;background:#f5f7fa;border-radius:8px;font-size:12px;color:#516078;">{summary}</div>
+    <div style="margin-top:7px;color:#718199;font-size:10px;">公告核验：一致 {reference_counts["consistent"]} · 差异 {reference_counts["conflict"]} · 待核验 {reference_counts["unknown"]}</div>
     {change_block}
     <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin-top:8px;border-collapse:collapse;">{''.join(rows)}</table>
-    <div style="margin-top:10px;color:#8a95a5;font-size:10px;line-height:16px;">仅报告天天基金公开交易页。支付宝、理财通及其他未接入渠道不作推断；暂停时不显示任何可买额度。本消息不构成投资建议。</div>
+    <div style="margin-top:10px;color:#8a95a5;font-size:10px;line-height:16px;">主状态为天天基金公开交易页；公告只作交叉核验，不覆盖渠道结论。支付宝、理财通及其他未接入渠道不作推断；暂停时不显示任何可买额度。本消息不构成投资建议。</div>
   </div>
 </div>'''
     if len(message) > 18_500:
@@ -543,8 +670,8 @@ def resolve_current_state(
     results: list[FundState] = []
     errors: list[str] = []
     workers = max(1, int(settings["safety"].get("max_parallel_requests", 2)))
-    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="tiantian") as executor:
-        pending = {executor.submit(fetch_tiantian_state, fund, settings, checked_at): fund for fund in funds}
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="public-source") as executor:
+        pending = {executor.submit(fetch_fund_state, fund, settings, checked_at): fund for fund in funds}
         for index, future in enumerate(as_completed(pending), start=1):
             fund = pending[future]
             try:
