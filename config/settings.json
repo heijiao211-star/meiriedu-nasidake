@@ -22,7 +22,7 @@
   "safety": {
     "min_fund_count": 5,
     "max_failure_ratio": 0.25,
-    "max_parallel_requests": 4
+    "max_parallel_requests": 2
   }
 }
 
