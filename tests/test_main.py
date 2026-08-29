@@ -79,6 +79,14 @@ class QuotaParserTests(unittest.TestCase):
         self.assertEqual(status, "suspended")
         self.assertIsNone(limit)
 
+    def test_paused_title_wins_over_historical_recovery_text(self):
+        content = "本基金曾于2025年恢复办理申购业务；现自公告日起暂停办理申购及定期定额投资业务。"
+        status, limit, _channel, _note = main.classify_state(
+            "华夏纳斯达克100ETF联接基金暂停申购及定期定额申购业务的公告", content, "015299"
+        )
+        self.assertEqual(status, "suspended")
+        self.assertIsNone(limit)
+
     def test_holiday_notice_is_not_a_quota_event(self):
         self.assertFalse(main.is_relevant_announcement("境外主要投资场所节假日暂停申购及定期定额申购业务的公告"))
 
