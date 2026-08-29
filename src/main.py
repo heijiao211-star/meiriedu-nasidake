@@ -245,6 +245,7 @@ def discover_funds(settings: dict[str, Any]) -> list[Fund]:
 
     pattern = re.compile(settings["universe"]["name_pattern"])
     excluded = set(settings["universe"].get("exclude_codes", []))
+    required_codes = {str(code).zfill(6) for code in settings["universe"].get("required_codes", [])}
     discovered: dict[str, Fund] = {}
     for row in rows:
         if not isinstance(row, list) or len(row) < 4:
@@ -269,6 +270,14 @@ def discover_funds(settings: dict[str, Any]) -> list[Fund]:
         code = str(row["code"]).zfill(6)
         if code not in excluded:
             discovered[code] = Fund(code=code, name=str(row["name"]), fund_type=str(row.get("fund_type", "QDII")))
+
+    # 经过人工审计的现有范围必须完整。上游代码表、筛选规则或命名变化若导致
+    # 任一已知基金消失，宁可让本次任务失败，也不发送“看似正常”的残缺清单。
+    missing_required = sorted(required_codes - set(discovered))
+    if missing_required:
+        raise DataSourceError(
+            "基金池完整性校验失败，缺少已审计基金代码：" + "、".join(missing_required) + "；本次不推送"
+        )
 
     min_fund_count = int(settings["safety"]["min_fund_count"])
     if len(discovered) < min_fund_count:
