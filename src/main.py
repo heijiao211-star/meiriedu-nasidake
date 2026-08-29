@@ -321,20 +321,30 @@ def format_amount(amount: Decimal) -> str:
     return f"¥{amount:,.2f}".rstrip("0").rstrip(".")
 
 
+def status_from_text(text: str) -> str:
+    """从一段公告标题或正文判定状态，完整暂停优先于恢复历史描述。"""
+    compact = normalise_name(text)
+    is_full_suspension = "暂停" in compact and "申购" in compact and "暂停大额申购" not in compact
+    if is_full_suspension:
+        return "suspended"
+    if any(token in compact for token in ("暂停大额申购", "限制大额申购", "限制申购金额", "调整大额申购")):
+        return "limited"
+    if re.search(r"恢复(?:办理)?(?:大额)?申购", compact) or re.search(r"恢复(?:办理)?定期定额", compact):
+        return "open"
+    return "unknown"
+
+
 def classify_state(title: str, content: str, fund_code: str) -> tuple[str, str | None, str, str | None]:
     text = normalise_name(f"{title} {plain_text(content)}")
     agency_limit = find_agency_limit(text)
     # 没有单列代销条件时，公告的统一表述通常同样适用于代销渠道；但若明确
     # 单列代销条件，绝不能让先出现的直销金额覆盖它。
     limit = agency_limit or find_limit(text, fund_code)
-    if re.search(r"恢复(?:办理)?(?:大额)?申购", text) or re.search(r"恢复(?:办理)?定期定额", text):
-        status = "open"
-    elif re.search(r"暂停(?:办理)?申购", text) and not re.search(r"暂停大额申购", text):
-        status = "suspended"
-    elif any(token in text for token in ("暂停大额申购", "限制大额申购", "限制申购金额", "调整大额申购")):
-        status = "limited"
-    else:
-        status = "unknown"
+    # 标题是这条公告当前动作的摘要；正文可能引用早期“恢复办理”等历史信息，
+    # 因此标题能明确判定时绝不让正文中的旧表述反向覆盖它。
+    status = status_from_text(title)
+    if status == "unknown":
+        status = status_from_text(text)
 
     has_direct = "直销" in text
     has_agency = any(token in text for token in ("代销", "销售机构", "各代销"))
