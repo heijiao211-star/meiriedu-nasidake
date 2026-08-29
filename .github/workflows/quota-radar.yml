@@ -1,0 +1,59 @@
+name: 纳指100场外基金额度雷达
+
+on:
+  schedule:
+    # UTC；对应北京时间 08:37、11:17、14:17。避开整点，降低排队延迟概率。
+    - cron: "37 0 * * 1-5"
+    - cron: "17 3 * * 1-5"
+    - cron: "17 6 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      force_digest:
+        description: "立即发送一条完整日报（用于首次测试）"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nasdaq100-quota-radar
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: 取出项目文件
+        uses: actions/checkout@v4
+
+      - name: 配置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 检查公告并生成推送
+        env:
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+          FORCE_DIGEST: ${{ inputs.force_digest }}
+        run: |
+          if [ "${FORCE_DIGEST}" = "true" ]; then
+            python src/main.py --force-digest
+          else
+            python src/main.py
+          fi
+
+      - name: 保存最新状态
+        run: |
+          if git diff --quiet -- state/last_snapshot.json; then
+            echo "状态未变化，无需提交。"
+            exit 0
+          fi
+          git config user.name "nasdaq100-quota-radar[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add state/last_snapshot.json
+          git commit -m "chore: update quota snapshot"
+          git push
+
