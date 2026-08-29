@@ -62,7 +62,7 @@ class AnnouncementReferenceTests(unittest.TestCase):
 
 
 class DiscoveryTests(unittest.TestCase):
-    def test_discovery_keeps_off_exchange_qdii_and_excludes_etf(self):
+    def test_discovery_keeps_overseas_fund_without_qdii_label_and_excludes_etf(self):
         settings = {
             "sources": {"fund_code_table": {"url": "https://example.test/funds", "referer": "https://example.test/"}},
             "universe": {"name_pattern": "纳斯达克100", "exclude_codes": [], "pinned_funds": []},
@@ -70,12 +70,16 @@ class DiscoveryTests(unittest.TestCase):
         }
         source = '''var r = [
           ["000834","dc","大成纳斯达克100ETF联接(QDII)A","指数型-海外股票","dc"],
+          ["160213","gt","国泰纳斯达克100指数","指数型-海外股票","gt"],
           ["513300","hx","华夏纳斯达克100ETF(QDII)","指数型-海外股票","hx"],
           ["000001","x","普通基金","混合型-偏股","x"]
         ];'''
         with patch.object(main, "request_text", return_value=source):
             funds = main.discover_funds(settings)
-        self.assertEqual([(item.code, item.name) for item in funds], [("000834", "大成纳斯达克100ETF联接(QDII)A")])
+        self.assertEqual(
+            {item.code: item.name for item in funds},
+            {"000834": "大成纳斯达克100ETF联接(QDII)A", "160213": "国泰纳斯达克100指数"},
+        )
 
 
 class SnapshotAndPresentationTests(unittest.TestCase):
