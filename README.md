@@ -52,7 +52,7 @@ GitHub 的定时任务并不保证精确到分钟，因此本项目设置了多�
 
 - `exclude_codes`：排除不想跟踪的基金代码；
 - `pinned_funds`：当自动发现暂未包含某只基金时，手动固定加入；
-- `max_parallel_requests`：公告抓取并发数，默认 6，已经兼顾速度和数据源压力；
+- `max_parallel_requests`：公告抓取并发数，默认 4，已经兼顾速度和数据源压力；
 - `max_failure_ratio`：单次最大容错比例，默认 25%。
 
 不要把 PushPlus Token 写进这个文件。
