@@ -51,6 +51,16 @@ class TiantianParserTests(unittest.TestCase):
         self.assertEqual(main.display_limit(state), "无限额")
 
 
+class AnnouncementReferenceTests(unittest.TestCase):
+    def test_direct_only_notice_is_not_used_as_channel_cross_check(self):
+        self.assertTrue(main.is_direct_only_reference("关于在基金管理人直销电子交易平台暂停申购业务的公告"))
+        self.assertFalse(main.is_direct_only_reference("关于暂停各销售机构申购业务的公告"))
+
+    def test_full_pause_and_large_purchase_limit_are_distinguished(self):
+        self.assertEqual(main.status_from_reference_title("关于暂停申购及定期定额投资业务的公告"), "suspended")
+        self.assertEqual(main.status_from_reference_title("关于调整大额申购及定期定额投资业务的公告"), "limited")
+
+
 class DiscoveryTests(unittest.TestCase):
     def test_discovery_keeps_off_exchange_qdii_and_excludes_etf(self):
         settings = {
@@ -86,6 +96,15 @@ class SnapshotAndPresentationTests(unittest.TestCase):
         self.assertIn("支付宝、理财通及其他未接入渠道不在本卡中推断", body)
         self.assertIn("测试&lt;script&gt;", body)
         self.assertNotIn("测试<script>", body)
+
+    def test_reference_conflict_is_explicit_without_overriding_channel_state(self):
+        state = main.FundState(
+            "015299", "华夏测试", "suspended", "¥100", "不可定投", "天天基金", None, "", "公开交易页",
+            reference_status="limited", reference_title="旧的限额公告"
+        )
+        self.assertTrue(main.has_reference_conflict(state))
+        self.assertEqual(main.reference_label(state), "公告有差异")
+        self.assertEqual(main.display_limit(state), "—")
 
 
 if __name__ == "__main__":
