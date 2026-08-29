@@ -1,10 +1,14 @@
-name: 纳指100代销额度雷达
+name: 纳指100公开渠道实况雷达
 
 on:
+  schedule:
+    # 工作日 08:00–22:30（北京时间）每 30 分钟巡检一次。
+    # GitHub Actions 使用 UTC：00:00–14:30 UTC 对应北京时间 08:00–22:30。
+    - cron: "0,30 0-14 * * 1-5"
   workflow_dispatch:
     inputs:
       force_digest:
-        description: "立即发送一条完整日报（用于首次测试）"
+        description: "立即发送一条完整汇总（首次测试可开启）"
         required: false
         default: true
         type: boolean
@@ -13,16 +17,13 @@ permissions:
   contents: write
 
 concurrency:
-  group: nasdaq100-quota-radar
+  group: nasdaq100-public-channel-radar
   cancel-in-progress: false
 
 jobs:
   monitor:
-    # 暂停原因：公开基金公告不能可靠反映支付宝的实时在售/预约状态。
-    # 在接入支付宝实时数据源前，禁止该工作流发送任何消息。
-    if: ${{ false }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - name: 取出项目文件
         uses: actions/checkout@v4
@@ -32,7 +33,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: 检查公告并生成推送
+      - name: 检查天天基金公开交易页并生成推送
         env:
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
           FORCE_DIGEST: ${{ inputs.force_digest }}
@@ -43,18 +44,16 @@ jobs:
             python src/main.py
           fi
 
-      - name: 保存最新状态
+      - name: 保存最新渠道状态
         run: |
           if git diff --quiet -- state/last_snapshot.json; then
             echo "状态未变化，无需提交。"
             exit 0
           fi
-          git config user.name "nasdaq100-quota-radar[bot]"
+          git config user.name "nasdaq100-public-radar[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add state/last_snapshot.json
-          git commit -m "chore: update quota snapshot"
-          # 运行期间仓库可能被手动更新或被接口更新；先以远端 main 为基线
-          # 重放本次只改快照的提交，避免 non-fast-forward 导致整个任务失败。
+          git commit -m "chore: update public channel snapshot"
+          # 运行期间若 main 有新提交，先将快照提交重放到最新 main，避免推送冲突。
           git pull --rebase origin main
           git push origin HEAD:main
-
