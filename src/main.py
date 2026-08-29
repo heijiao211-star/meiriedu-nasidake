@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import html
+import http.client
 import json
 import logging
 import os
@@ -82,7 +83,7 @@ def write_json(path: Path, data: Any) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def request_text(url: str, *, headers: dict[str, str] | None = None, retries: int = 3) -> str:
+def request_text(url: str, *, headers: dict[str, str] | None = None, retries: int = 2) -> str:
     merged_headers = {"User-Agent": USER_AGENT, "Accept": "application/json, text/plain, text/html, */*"}
     if headers:
         merged_headers.update(headers)
@@ -90,10 +91,10 @@ def request_text(url: str, *, headers: dict[str, str] | None = None, retries: in
     for attempt in range(retries):
         try:
             request = Request(url, headers=merged_headers)
-            with urlopen(request, timeout=25) as response:  # noqa: S310 - public, configured HTTPS endpoints
+            with urlopen(request, timeout=15) as response:  # noqa: S310 - public, configured HTTPS endpoints
                 charset = response.headers.get_content_charset() or "utf-8"
                 return response.read().decode(charset, errors="replace")
-        except (HTTPError, URLError, TimeoutError) as exc:
+        except (HTTPError, URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
             last_error = exc
             if attempt < retries - 1:
                 time.sleep(1.5 * (attempt + 1))
@@ -284,6 +285,22 @@ def source_url(announcement_id: str | None, settings: dict[str, Any]) -> str | N
     return settings["sources"]["announcement_page"].format(announcement_id=announcement_id)
 
 
+def unavailable_fund_state(fund: Fund, note: str, *, channel: str = "待公告核验") -> FundState:
+    return FundState(
+        code=fund.code,
+        name=fund.name,
+        status="unknown",
+        limit=None,
+        channel=channel,
+        announcement_id=None,
+        announcement_title=None,
+        announcement_date=None,
+        source_url=None,
+        confidence="待下次复查",
+        note=note,
+    )
+
+
 def fetch_fund_state(fund: Fund, settings: dict[str, Any]) -> FundState:
     rows = announcements_for(fund, settings)
     for row in rows:
@@ -314,19 +331,7 @@ def fetch_fund_state(fund: Fund, settings: dict[str, Any]) -> FundState:
             confidence="公告标题+正文" if not note else "公告标题",
             note=note,
         )
-    return FundState(
-        code=fund.code,
-        name=fund.name,
-        status="unknown",
-        limit=None,
-        channel="待公告核验",
-        announcement_id=None,
-        announcement_title=None,
-        announcement_date=None,
-        source_url=None,
-        confidence="无匹配公告",
-        note="未找到可判定当前限额的公告",
-    )
+    return unavailable_fund_state(fund, "未找到可判定当前限额的公告")
 
 
 def serialise_state(item: FundState) -> dict[str, Any]:
@@ -565,17 +570,19 @@ def resolve_current_state(
     previous_by_code = {item.code: item for item in previous}
     results: list[FundState] = []
     errors: list[str] = []
-    workers = max(1, int(settings["safety"].get("max_parallel_requests", 6)))
+    workers = max(1, int(settings["safety"].get("max_parallel_requests", 4)))
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="announcement") as executor:
         pending = {executor.submit(fetch_fund_state, fund, settings): fund for fund in funds}
         for index, future in enumerate(as_completed(pending), start=1):
             fund = pending[future]
             try:
                 results.append(future.result())
-            except DataSourceError as exc:
-                errors.append(f"{fund.code} {fund.name}: {exc}")
+            except Exception as exc:  # 单只基金的网络/解析故障不应中断整批监控。
+                errors.append(f"{fund.code} {fund.name}: {type(exc).__name__}: {exc}")
                 if fund.code in previous_by_code:
                     results.append(previous_by_code[fund.code])
+                else:
+                    results.append(unavailable_fund_state(fund, "本次公告读取失败，已安排下次自动复查"))
             logging.info("已检查 %s/%s：%s", index, len(funds), fund.code)
     return sorted(results, key=lambda item: item.code), errors
 
