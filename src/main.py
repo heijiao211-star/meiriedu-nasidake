@@ -1,7 +1,7 @@
-"""纳斯达克 100 场外 QDII 额度雷达。
+"""纳斯达克 100 场外 QDII 代销额度雷达。
 
-数据以基金公告为依据，展示的是基金公告中的全渠道/代销/直销口径；
-支付宝 App 的即时可买状态会受渠道库存等因素影响，因此不会被误报为精确余额。
+数据以基金公告为依据，只展示代销渠道（含支付宝）的申购/定投口径。
+直销专属公告不会覆盖代销状态；支付宝 App 的即时可买状态仍以下单页为准。
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
@@ -31,11 +32,30 @@ CONFIG_PATH = ROOT / "config" / "settings.json"
 STATE_PATH = ROOT / "state" / "last_snapshot.json"
 REPORT_PATH = ROOT / "reports" / "latest-report.html"
 BEIJING = ZoneInfo("Asia/Shanghai")
-USER_AGENT = "Nasdaq100-Quota-Radar/1.0 (+https://github.com/heijiao211-star/meiriedu-nasidake)"
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+)
+# 公告接口对突发并发较敏感。所有请求至少相隔 0.35 秒启动；网络读取仍可重叠，
+# 因此不会牺牲太多运行速度，却能显著降低 RemoteDisconnected 的概率。
+REQUEST_PACE_SECONDS = 0.35
+_request_pace_lock = threading.Lock()
+_next_request_start = 0.0
 
 
 class DataSourceError(RuntimeError):
     """一个外部数据源没有返回可用内容。"""
+
+
+def pace_request() -> None:
+    """在并发抓取时对公共公告源做全局节流。"""
+    global _next_request_start
+    with _request_pace_lock:
+        now = time.monotonic()
+        wait_seconds = max(0.0, _next_request_start - now)
+        _next_request_start = max(now, _next_request_start) + REQUEST_PACE_SECONDS
+    if wait_seconds:
+        time.sleep(wait_seconds)
 
 
 @dataclass(frozen=True)
@@ -90,10 +110,21 @@ def request_text(url: str, *, headers: dict[str, str] | None = None, retries: in
     last_error: Exception | None = None
     for attempt in range(retries):
         try:
+            pace_request()
             request = Request(url, headers=merged_headers)
             with urlopen(request, timeout=15) as response:  # noqa: S310 - public, configured HTTPS endpoints
-                charset = response.headers.get_content_charset() or "utf-8"
-                return response.read().decode(charset, errors="replace")
+                body = response.read()
+                # 东方财富部分公告接口会把 GBK/GB18030 正文错误标为 ISO-8859-1。
+                # 先严格按 UTF-8、再按国标扩展编码解码，最后才信任响应头，避免
+                # “额度数字可见、代销/直销中文字段乱码”导致渠道判断失真。
+                declared_charset = response.headers.get_content_charset()
+                candidates = ("utf-8", "gb18030", declared_charset)
+                for charset in dict.fromkeys(charset for charset in candidates if charset):
+                    try:
+                        return body.decode(charset)
+                    except UnicodeDecodeError:
+                        continue
+                return body.decode("utf-8", errors="replace")
         except (HTTPError, URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
             last_error = exc
             if attempt < retries - 1:
@@ -178,7 +209,9 @@ def announcements_for(fund: Fund, settings: dict[str, Any]) -> list[dict[str, An
 
 def announcement_content(announcement_id: str, settings: dict[str, Any]) -> str:
     source = settings["sources"]["announcement_content"]
-    raw = request_text(source["url"].format(announcement_id=announcement_id))
+    # 公告正文接口偶发主动断开；正文是渠道识别的必要依据，因此多试几次，
+    # 宁可保留上一次可信结果，也不以标题猜测代销额度。
+    raw = request_text(source["url"].format(announcement_id=announcement_id), retries=4)
     payload = parse_json_or_jsonp(raw)
     if not isinstance(payload, dict):
         raise DataSourceError("公告正文格式异常")
@@ -204,6 +237,18 @@ def is_relevant_announcement(title: str) -> bool:
     # 节假日的临时闭市公告不能覆盖真正的申购额度状态。
     is_holiday_only = any(token in compact for token in ("节假日", "非交易日", "境外主要投资场所"))
     return has_business and has_change and not is_holiday_only
+
+
+def is_direct_only_announcement(title: str) -> bool:
+    """判断标题是否明确只调整直销渠道。
+
+    直销专属公告不能代表支付宝等代销平台的状态。遇到这类公告时，继续回溯
+    该基金最近一条适用于代销渠道的公告，而不是把直销额度误报给用户。
+    """
+    compact = normalise_name(title)
+    has_direct = "直销" in compact
+    has_agency = any(token in compact for token in ("代销", "销售机构"))
+    return has_direct and not has_agency
 
 
 def get_field(row: dict[str, Any], *keys: str) -> str | None:
@@ -242,6 +287,34 @@ def find_limit(text: str, fund_code: str) -> str | None:
     return None
 
 
+def find_agency_limit(text: str) -> str | None:
+    """优先提取明确写给代销/销售机构的额度。
+
+    不少公告会先列直销额度、再列代销额度。通用金额提取会误拿到前者，
+    所以先在“代销机构/销售机构”附近寻找金额；无法定位时才使用公告统一口径。
+    """
+    compact = normalise_name(text)
+    amount_patterns = (
+        r"(?:不应超过|不得超过|不超过|上限(?:为|调整为)?|限制金额(?:为)?)[^0-9]{0,24}([0-9][0-9,]*(?:\.\d+)?)\s*(?:人民币)?元",
+        r"(?:单日|每日)[^。；]{0,70}?([0-9][0-9,]*(?:\.\d+)?)\s*(?:人民币)?元",
+        r"(?:调整为|由[^。；]{0,50}?调整至)[^0-9]{0,24}([0-9][0-9,]*(?:\.\d+)?)\s*(?:人民币)?元",
+    )
+    marker = re.compile(r"(?:通过)?(?:各)?(?:代销机构|销售机构)")
+    for marker_match in marker.finditer(compact):
+        # 公告里渠道说明到金额之间通常是一句完整限制条件；留出足够窗口，
+        # 但不跨到下一条渠道规则，以免重新拾取直销金额。
+        window = compact[marker_match.start() : marker_match.start() + 280]
+        for pattern in amount_patterns:
+            amount_match = re.search(pattern, window)
+            if not amount_match:
+                continue
+            try:
+                return format_amount(Decimal(amount_match.group(1).replace(",", "")))
+            except InvalidOperation:
+                continue
+    return None
+
+
 def format_amount(amount: Decimal) -> str:
     if amount == amount.to_integral():
         return f"¥{int(amount):,}"
@@ -250,7 +323,10 @@ def format_amount(amount: Decimal) -> str:
 
 def classify_state(title: str, content: str, fund_code: str) -> tuple[str, str | None, str, str | None]:
     text = normalise_name(f"{title} {plain_text(content)}")
-    limit = find_limit(text, fund_code)
+    agency_limit = find_agency_limit(text)
+    # 没有单列代销条件时，公告的统一表述通常同样适用于代销渠道；但若明确
+    # 单列代销条件，绝不能让先出现的直销金额覆盖它。
+    limit = agency_limit or find_limit(text, fund_code)
     if re.search(r"恢复(?:办理)?(?:大额)?申购", text) or re.search(r"恢复(?:办理)?定期定额", text):
         status = "open"
     elif re.search(r"暂停(?:办理)?申购", text) and not re.search(r"暂停大额申购", text):
@@ -262,14 +338,12 @@ def classify_state(title: str, content: str, fund_code: str) -> tuple[str, str |
 
     has_direct = "直销" in text
     has_agency = any(token in text for token in ("代销", "销售机构", "各代销"))
-    if has_direct and has_agency:
-        channel = "分渠道（请查看公告）"
-    elif has_agency:
-        channel = "代销渠道（支付宝通常适用）"
+    if has_agency:
+        channel = "代销渠道（含支付宝）"
     elif has_direct:
-        channel = "直销渠道"
+        channel = "代销口径（公告另列直销）"
     else:
-        channel = "公告未区分渠道"
+        channel = "代销口径（公告统一）"
 
     note = None
     if status == "limited" and limit is None:
@@ -303,9 +377,13 @@ def unavailable_fund_state(fund: Fund, note: str, *, channel: str = "待公告�
 
 def fetch_fund_state(fund: Fund, settings: dict[str, Any]) -> FundState:
     rows = announcements_for(fund, settings)
+    last_content_error: DataSourceError | None = None
     for row in rows:
         title = get_field(row, "TITLE", "title", "NoticeTitle") or ""
         if not is_relevant_announcement(title):
+            continue
+        if is_direct_only_announcement(title):
+            # 只改变直销渠道的公告不影响支付宝等代销渠道，继续寻找上一条代销口径公告。
             continue
         announcement_id = get_field(row, "ID", "id", "ArtCode", "art_code")
         published_at = get_field(row, "PUBLISHDATEDesc", "PUBLISHDATE", "publishDate", "NOTICE_DATE")
@@ -315,9 +393,10 @@ def fetch_fund_state(fund: Fund, settings: dict[str, Any]) -> FundState:
             content = announcement_content(announcement_id, settings)
             status, limit, channel, note = classify_state(title, content, fund.code)
         except DataSourceError as exc:
-            # 标题本身仍可提供有限信息，但不会伪造金额。
-            status, limit, channel, note = classify_state(title, "", fund.code)
-            note = f"正文读取失败：{exc}"
+            # 标题无法可靠判断直销/代销条件；继续回溯较早公告。若都失败，
+            # 让上层保留历史快照，而不是用一条不完整状态覆盖它。
+            last_content_error = exc
+            continue
         return FundState(
             code=fund.code,
             name=fund.name,
@@ -331,6 +410,8 @@ def fetch_fund_state(fund: Fund, settings: dict[str, Any]) -> FundState:
             confidence="公告标题+正文" if not note else "公告标题",
             note=note,
         )
+    if last_content_error:
+        raise DataSourceError(f"{fund.code} 未能读取任何可用公告正文：{last_content_error}")
     return unavailable_fund_state(fund, "未找到可判定当前限额的公告")
 
 
@@ -446,14 +527,14 @@ def build_compact_message_html(states: list[FundState], changes: list[Change], n
     summary = f'开放 {counts["open"]} · 限额 {counts["limited"]} · 暂停 {counts["suspended"]} · 待核验 {counts["unknown"]}'
     return f'''<div style="max-width:680px;margin:0 auto;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;color:#1b2942;">
   <div style="padding:18px;background:#182a51;color:white;border-radius:12px 12px 0 0;">
-    <div style="font-size:18px;font-weight:800;">纳指100 场外基金额度雷达</div>
+    <div style="font-size:18px;font-weight:800;">纳指100 场外基金代销额度雷达</div>
     <div style="margin-top:6px;font-size:12px;color:#c8d5f8;">{now.strftime("%Y年%m月%d日 %H:%M")}（北京时间）</div>
   </div>
   <div style="padding:14px;border:1px solid #e3e8f0;border-top:0;border-radius:0 0 12px 12px;">
     <div style="padding:9px 10px;background:#f5f7fa;border-radius:8px;font-size:12px;color:#516078;">{summary}</div>
     {change_block}
     <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin-top:8px;border-collapse:collapse;">{''.join(rows)}</table>
-    <div style="margin-top:10px;color:#8a95a5;font-size:10px;line-height:16px;">同规则份额已合并展示。数据来自基金公告；支付宝实际可买状态以下单页为准。本消息不构成投资建议。</div>
+    <div style="margin-top:10px;color:#8a95a5;font-size:10px;line-height:16px;">仅显示代销渠道（含支付宝）口径，直销专属公告已排除。支付宝实际可买状态以下单页为准。本消息不构成投资建议。</div>
   </div>
 </div>'''
 
@@ -464,7 +545,7 @@ def build_message_html(
     grouped = group_for_display(states)
     counts = {key: sum(item.status == key for item in states) for key in STATUS_META}
     title_prefix = "首次建档" if initial else "每日汇总" if is_digest else "额度变动"
-    title = f"纳指100场外基金｜{title_prefix}"
+    title = f"纳指100代销额度｜{title_prefix}"
     date_label = now.strftime("%Y年%m月%d日 %H:%M")
     change_block = ""
     if changes:
@@ -514,8 +595,8 @@ def build_message_html(
     )
     message = f'''<div style="max-width:680px;margin:0 auto;background:#ffffff;color:#18243a;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;">
   <div style="padding:24px 22px 22px;background:linear-gradient(135deg,#111b34 0%,#263e79 100%);border-radius:16px 16px 0 0;color:#ffffff;">
-    <div style="font-size:12px;letter-spacing:1.2px;opacity:.74;">NASDAQ-100 · QDII QUOTA RADAR</div>
-    <div style="margin-top:8px;font-size:22px;font-weight:800;letter-spacing:.2px;">纳指100 场外基金额度雷达</div>
+    <div style="font-size:12px;letter-spacing:1.2px;opacity:.74;">NASDAQ-100 · DISTRIBUTOR QUOTA RADAR</div>
+    <div style="margin-top:8px;font-size:22px;font-weight:800;letter-spacing:.2px;">纳指100 场外基金代销额度雷达</div>
     <div style="margin-top:9px;font-size:12px;color:#cbd7fb;">{date_label}（北京时间）</div>
   </div>
   <div style="padding:18px 18px 22px;border:1px solid #e7ebf2;border-top:0;border-radius:0 0 16px 16px;">
@@ -524,14 +605,14 @@ def build_message_html(
     <div style="margin:16px 0 8px;font-size:13px;font-weight:800;color:#27344d;">完整清单</div>
     <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;table-layout:fixed;">
       <thead><tr>
-        <th style="padding:8px 8px 8px 0;text-align:left;color:#8a96a9;font-size:11px;font-weight:700;">基金 / 渠道口径</th>
+        <th style="padding:8px 8px 8px 0;text-align:left;color:#8a96a9;font-size:11px;font-weight:700;">基金 / 代销口径</th>
         <th style="padding:8px 5px;text-align:center;color:#8a96a9;font-size:11px;font-weight:700;white-space:nowrap;">状态</th>
-        <th style="padding:8px 0 8px 5px;text-align:right;color:#8a96a9;font-size:11px;font-weight:700;white-space:nowrap;">单日上限</th>
+        <th style="padding:8px 0 8px 5px;text-align:right;color:#8a96a9;font-size:11px;font-weight:700;white-space:nowrap;">代销日上限</th>
       </tr></thead>
       <tbody>{''.join(table_rows)}</tbody>
     </table>
     <div style="margin-top:15px;padding-top:12px;border-top:1px solid #eef1f5;color:#8793a7;font-size:11px;line-height:18px;">
-      同一基金中状态、限额和渠道一致的不同份额已合并展示。数据口径：基金公告；支付宝实际可买状态可能受代销渠道库存影响，请以下单页为准。<br>
+      同一基金中状态、额度和代销口径一致的不同份额已合并展示。只采用基金公告中适用于代销/销售机构的条件；直销专属公告不会覆盖本表。支付宝实际可买状态可能受渠道库存影响，请以下单页为准。<br>
       本消息仅作公开信息监控，不构成任何投资建议。
     </div>
   </div>
