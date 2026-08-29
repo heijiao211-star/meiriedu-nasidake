@@ -1,11 +1,6 @@
 name: 纳指100代销额度雷达
 
 on:
-  schedule:
-    # UTC；对应北京时间 08:37、11:17、14:17。避开整点，降低排队延迟概率。
-    - cron: "37 0 * * 1-5"
-    - cron: "17 3 * * 1-5"
-    - cron: "17 6 * * 1-5"
   workflow_dispatch:
     inputs:
       force_digest:
@@ -23,6 +18,9 @@ concurrency:
 
 jobs:
   monitor:
+    # 暂停原因：公开基金公告不能可靠反映支付宝的实时在售/预约状态。
+    # 在接入支付宝实时数据源前，禁止该工作流发送任何消息。
+    if: ${{ false }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
