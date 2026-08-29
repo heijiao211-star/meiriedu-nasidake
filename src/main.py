@@ -253,8 +253,12 @@ def discover_funds(settings: dict[str, Any]) -> list[Fund]:
         compact_name = normalise_name(name)
         if not re.fullmatch(r"\d{6}", code) or code in excluded:
             continue
+        # 代码表偶尔省略基金名称中的 “QDII” 标记。例如 160213 国泰纳斯达克
+        # 100 指数在代码表中只标为“指数型-海外股票”。海外类型同样可作为场外
+        # QDII 候选的公开分类依据，不能仅因缺少字样而漏掉。
         is_qdii = "QDII" in compact_name.upper() or "QDII" in fund_type.upper()
-        if not pattern.search(compact_name) or not is_qdii:
+        is_overseas_fund = "海外" in compact_name or "海外" in fund_type
+        if not pattern.search(compact_name) or not (is_qdii or is_overseas_fund):
             continue
         # 场内 ETF 不属于定投的场外基金范围；ETF 联接基金保留。
         if "ETF" in compact_name.upper() and "联接" not in compact_name:
