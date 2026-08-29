@@ -10,19 +10,15 @@
       "url": "https://fund.eastmoney.com/js/fundcode_search.js",
       "referer": "https://fund.eastmoney.com/"
     },
-    "announcement_list": {
-      "url": "https://api.fund.eastmoney.com/f10/JJGG?fundcode={code}&pageIndex=1&pageSize=50&type=0&_={timestamp}",
-      "referer": "https://fundf10.eastmoney.com/jjgg_{code}_0.html"
-    },
-    "announcement_content": {
-      "url": "https://np-cnotice-fund.eastmoney.com/api/content/ann?client_source=web_fund&show_all=1&art_code={announcement_id}"
-    },
-    "announcement_page": "https://fund.eastmoney.com/a/{announcement_id}.html"
+    "tiantian": {
+      "channel": "天天基金",
+      "url": "https://fundf10.eastmoney.com/jjfl_{code}.html",
+      "referer": "https://fund.eastmoney.com/"
+    }
   },
   "safety": {
     "min_fund_count": 5,
-    "max_failure_ratio": 0.25,
+    "max_failure_ratio": 0.15,
     "max_parallel_requests": 2
   }
 }
-
