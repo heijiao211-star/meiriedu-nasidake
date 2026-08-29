@@ -14,7 +14,12 @@
       "channel": "天天基金",
       "url": "https://fundf10.eastmoney.com/jjfl_{code}.html",
       "referer": "https://fund.eastmoney.com/"
-    }
+    },
+    "announcement_list": {
+      "url": "https://api.fund.eastmoney.com/f10/JJGG?fundcode={code}&pageIndex=1&pageSize=50&type=0&_={timestamp}",
+      "referer": "https://fundf10.eastmoney.com/jjgg_{code}_0.html"
+    },
+    "announcement_page": "https://fund.eastmoney.com/a/{announcement_id}.html"
   },
   "safety": {
     "min_fund_count": 5,
