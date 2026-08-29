@@ -678,6 +678,10 @@ def run(*, dry_run: bool, force_digest: bool) -> int:
     funds = discover_funds(settings)
     current, errors = resolve_current_state(funds, settings, previous)
     max_failures = max(1, int(len(funds) * float(settings["safety"]["max_failure_ratio"])))
+    # 新口径的首次建档必须是完整可信的一次读取；否则不能把“待核验”混进
+    # 看似完整的首条卡片，也不能留下不完整快照影响后续变化判断。
+    if not previous and errors:
+        raise DataSourceError(f"首次建档有 {len(errors)}/{len(funds)} 只基金正文读取失败；本次不推送，等待下次完整复查")
     if len(errors) > max_failures:
         raise DataSourceError(f"本次有 {len(errors)}/{len(funds)} 只基金读取失败，超过安全阈值 {max_failures}；没有覆盖历史状态")
     if not current:
