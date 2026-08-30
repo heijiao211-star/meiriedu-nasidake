@@ -2,13 +2,13 @@ name: 纳指100公开渠道实况雷达
 
 on:
   schedule:
-    # 工作日 08:00–22:30（北京时间）每 30 分钟巡检一次。
-    # GitHub Actions 使用 UTC：00:00–14:30 UTC 对应北京时间 08:00–22:30。
-    - cron: "0,30 0-14 * * 1-5"
+    # 每天北京时间 09:00、13:00、20:00 各发送一条完整汇总。
+    # GitHub Actions 使用 UTC，对应为 01:00、05:00、12:00 UTC。
+    - cron: "0 1,5,12 * * *"
   workflow_dispatch:
     inputs:
       force_digest:
-        description: "立即发送一条完整汇总（首次测试可开启）"
+        description: "立即发送一条完整汇总"
         required: false
         default: true
         type: boolean
@@ -38,7 +38,7 @@ jobs:
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
           FORCE_DIGEST: ${{ inputs.force_digest }}
         run: |
-          if [ "${FORCE_DIGEST}" = "true" ]; then
+          if [ "${{ github.event_name }}" = "schedule" ] || [ "${FORCE_DIGEST}" = "true" ]; then
             python src/main.py --force-digest
           else
             python src/main.py
