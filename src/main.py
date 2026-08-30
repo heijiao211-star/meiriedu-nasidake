@@ -504,13 +504,44 @@ def product_name(name: str) -> str:
     return result.rstrip("- ") or name
 
 
+def display_sort_key(item: FundState) -> tuple[int, Decimal, str, str]:
+    """让可定投且日上限更高的基金优先出现，便于快速找到可操作额度。"""
+    active = item.status in {"open", "limited"}
+    can_dca = item.dca_status == "可定投"
+    if active and can_dca:
+        tier = 0
+        if item.status == "open" and item.limit is None:
+            # 页面明确开放且没有限额时，展示为无限额，应位于所有有限额度之前。
+            amount_rank = Decimal("-Infinity")
+        elif item.limit:
+            try:
+                amount_rank = -Decimal(item.limit.removeprefix("¥").replace(",", ""))
+            except InvalidOperation:
+                amount_rank = Decimal("Infinity")
+        else:
+            # 限额但页面没有可识别金额时，不能假装额度很高。
+            amount_rank = Decimal("Infinity")
+    elif active:
+        tier = 1
+        amount_rank = Decimal("Infinity")
+    elif item.status == "suspended":
+        tier = 2
+        amount_rank = Decimal("Infinity")
+    else:
+        tier = 3
+        amount_rank = Decimal("Infinity")
+    return tier, amount_rank, product_name(item.name), item.code
+
+
 def group_for_display(states: list[FundState]) -> list[tuple[str, list[FundState]]]:
     groups: dict[tuple[str, str, str | None, str, str, str], list[FundState]] = {}
     for item in states:
         key = (product_name(item.name), item.status, item.limit, item.dca_status, item.channel, item.reference_status)
         groups.setdefault(key, []).append(item)
-    order = {"open": 0, "limited": 1, "suspended": 2, "unknown": 3}
-    return sorted(((key[0], members) for key, members in groups.items()), key=lambda item: (order.get(item[1][0].status, 4), item[0]))
+    return sorted(
+        ((key[0], members) for key, members in groups.items()),
+        key=lambda item: display_sort_key(item[1][0]),
+    )
 
 
 def build_message_html(
@@ -583,12 +614,13 @@ def build_message_html(
     <div style="padding:12px 14px;border-radius:10px;background:#f4f7fc;color:#50617b;font-size:13px;line-height:21px;">{summary}</div>
     <div style="margin-top:8px;color:#718199;font-size:11px;line-height:17px;">公告交叉核验：一致 {reference_counts["consistent"]} · 有差异 {reference_counts["conflict"]} · 待核验 {reference_counts["unknown"]}</div>
     {change_block}
-    <div style="margin:16px 0 8px;font-size:13px;font-weight:800;color:#26364f;">完整清单</div>
+    <div style="margin:16px 0 3px;font-size:13px;font-weight:800;color:#26364f;">完整清单</div>
+    <div style="margin:0 0 8px;color:#718199;font-size:11px;line-height:17px;">可定投基金优先，按该渠道日申购上限从高到低排列；无限额排最前。</div>
     <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;table-layout:fixed;">
       <thead><tr>
         <th style="padding:8px 8px 8px 0;text-align:left;color:#8996a9;font-size:11px;font-weight:700;">基金 / 已核验渠道</th>
         <th style="padding:8px 5px;text-align:center;color:#8996a9;font-size:11px;font-weight:700;white-space:nowrap;">申购 / 定投</th>
-        <th style="padding:8px 0 8px 5px;text-align:right;color:#8996a9;font-size:11px;font-weight:700;white-space:nowrap;">日上限</th>
+        <th style="padding:8px 0 8px 5px;text-align:right;color:#8996a9;font-size:11px;font-weight:700;white-space:nowrap;">日申购上限</th>
       </tr></thead>
       <tbody>{''.join(table_rows)}</tbody>
     </table>
