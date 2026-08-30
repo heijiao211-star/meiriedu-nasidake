@@ -122,6 +122,17 @@ class SnapshotAndPresentationTests(unittest.TestCase):
         self.assertIn("测试&lt;script&gt;", body)
         self.assertNotIn("测试<script>", body)
 
+    def test_display_sorts_dca_funds_by_daily_limit_descending(self):
+        states = [
+            main.FundState("000001", "低额基金A", "limited", "¥5", "可定投", "天天基金", None, "", "公开交易页"),
+            main.FundState("000002", "暂停基金A", "suspended", "¥500", "不可定投", "天天基金", None, "", "公开交易页"),
+            main.FundState("000003", "高额基金A", "limited", "¥50", "可定投", "天天基金", None, "", "公开交易页"),
+            main.FundState("000004", "无限额基金A", "open", None, "可定投", "天天基金", None, "", "公开交易页"),
+            main.FundState("000005", "不可定投基金A", "limited", "¥100", "不可定投", "天天基金", None, "", "公开交易页"),
+        ]
+        grouped = main.group_for_display(states)
+        self.assertEqual([members[0].code for _name, members in grouped], ["000004", "000003", "000001", "000005", "000002"])
+
     def test_reference_conflict_is_explicit_without_overriding_channel_state(self):
         state = main.FundState(
             "015299", "华夏测试", "suspended", "¥100", "不可定投", "天天基金", None, "", "公开交易页",
