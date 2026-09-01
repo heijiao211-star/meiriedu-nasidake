@@ -505,7 +505,7 @@ def product_name(name: str) -> str:
 
 
 def display_sort_key(item: FundState) -> tuple[int, Decimal, str, str]:
-    """让可定投且日上限更高的基金优先出现，便于快速找到可操作额度。"""
+    """按天天基金“定投支持 + 单日申购上限”排序，不能解读为其他平台定投额度。"""
     active = item.status in {"open", "limited"}
     can_dca = item.dca_status == "可定投"
     if active and can_dca:
@@ -555,7 +555,7 @@ def build_message_html(
         "unknown": sum(item.reference_status == "unknown" for item in states),
     }
     title_prefix = "首次建档" if initial else "每日汇总" if is_digest else "状态变动"
-    title = f"纳指100公开渠道｜{title_prefix}"
+    title = f"天天基金纳指100｜{title_prefix}"
     date_label = now.strftime("%Y年%m月%d日 %H:%M")
     change_block = ""
     if changes:
@@ -589,10 +589,11 @@ def build_message_html(
             f'<div style="margin-top:3px;color:#8290a5;font-size:11px;line-height:17px;">{html.escape(shares)} · {html.escape(codes)} · {html.escape(item.channel)} · {html.escape(reference_note)}</div>{note}'
             '</td>'
             '<td style="padding:13px 5px;border-bottom:1px solid #e9eef5;vertical-align:top;text-align:center;white-space:nowrap;">'
-            f'{status_badge(item.status)}<div style="margin-top:5px;color:#697993;font-size:11px;">定投：{html.escape(item.dca_status)}</div>'
+            f'{status_badge(item.status)}<div style="margin-top:5px;color:#697993;font-size:11px;">定投支持：{html.escape(item.dca_status)}</div>'
             '</td>'
             '<td style="padding:13px 0 13px 5px;border-bottom:1px solid #e9eef5;vertical-align:top;text-align:right;white-space:nowrap;">'
-            f'<div style="font-size:13px;font-weight:800;color:#1f2e48;">{html.escape(display_limit(item))}</div>'
+            '<div style="color:#8290a5;font-size:10px;">天天基金</div>'
+            f'<div style="margin-top:2px;font-size:13px;font-weight:800;color:#1f2e48;">单日申购 {html.escape(display_limit(item))}</div>'
             '</td>'
             '</tr>'
         )
@@ -607,25 +608,25 @@ def build_message_html(
     message = f'''<div style="max-width:680px;margin:0 auto;background:#ffffff;color:#18243a;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;">
   <div style="padding:24px 22px 22px;background:linear-gradient(135deg,#101a31 0%,#254883 100%);border-radius:16px 16px 0 0;color:#ffffff;">
     <div style="font-size:12px;letter-spacing:1.3px;opacity:.75;">NASDAQ-100 · PUBLIC DISTRIBUTOR MONITOR</div>
-    <div style="margin-top:8px;font-size:22px;font-weight:800;letter-spacing:.2px;">纳指100 公开渠道实况雷达</div>
-    <div style="margin-top:9px;font-size:12px;color:#cbd9fb;">{date_label}（北京时间） · 主渠道：天天基金</div>
+    <div style="margin-top:8px;font-size:22px;font-weight:800;letter-spacing:.2px;">纳指100｜天天基金渠道实况</div>
+    <div style="margin-top:9px;font-size:12px;color:#cbd9fb;">{date_label}（北京时间） · 仅代表天天基金</div>
   </div>
   <div style="padding:18px 18px 22px;border:1px solid #e3eaf4;border-top:0;border-radius:0 0 16px 16px;">
     <div style="padding:12px 14px;border-radius:10px;background:#f4f7fc;color:#50617b;font-size:13px;line-height:21px;">{summary}</div>
     <div style="margin-top:8px;color:#718199;font-size:11px;line-height:17px;">公告交叉核验：一致 {reference_counts["consistent"]} · 有差异 {reference_counts["conflict"]} · 待核验 {reference_counts["unknown"]}</div>
     {change_block}
     <div style="margin:16px 0 3px;font-size:13px;font-weight:800;color:#26364f;">完整清单</div>
-    <div style="margin:0 0 8px;color:#718199;font-size:11px;line-height:17px;">可定投基金优先，按该渠道日申购上限从高到低排列；无限额排最前。</div>
+    <div style="margin:0 0 8px;color:#718199;font-size:11px;line-height:17px;">定投支持的基金优先，按天天基金单日申购上限从高到低排列；无限额排最前。</div>
     <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;table-layout:fixed;">
       <thead><tr>
         <th style="padding:8px 8px 8px 0;text-align:left;color:#8996a9;font-size:11px;font-weight:700;">基金 / 已核验渠道</th>
-        <th style="padding:8px 5px;text-align:center;color:#8996a9;font-size:11px;font-weight:700;white-space:nowrap;">申购 / 定投</th>
-        <th style="padding:8px 0 8px 5px;text-align:right;color:#8996a9;font-size:11px;font-weight:700;white-space:nowrap;">日申购上限</th>
+        <th style="padding:8px 5px;text-align:center;color:#8996a9;font-size:11px;font-weight:700;white-space:nowrap;">申购 / 定投支持</th>
+        <th style="padding:8px 0 8px 5px;text-align:right;color:#8996a9;font-size:11px;font-weight:700;white-space:nowrap;">天天基金单日申购上限</th>
       </tr></thead>
       <tbody>{''.join(table_rows)}</tbody>
     </table>
     <div style="margin-top:15px;padding-top:12px;border-top:1px solid #e9eef5;color:#7f8ea4;font-size:11px;line-height:18px;">
-      主状态来自天天基金公开交易详情页；基金公司适用公告只用于交叉核验，不会覆盖渠道页面。支付宝、理财通及其他未接入渠道不在本卡中推断。暂停申购时，即使网页仍保留历史限额数字，也会显示“—”。<br>
+      主状态和“单日申购上限”均来自天天基金公开交易详情页；“定投支持”只表示天天基金是否支持该功能。该金额不是支付宝/蚂蚁基金、理财通或其他平台的单期定投额度，实际下单以所在平台页面为准。基金公司适用公告只用于交叉核验，不会覆盖渠道页面。暂停申购时，即使网页仍保留历史限额数字，也会显示“—”。<br>
       本消息只作公开信息提醒，不构成投资建议。
     </div>
   </div>
@@ -661,21 +662,21 @@ def build_compact_message_html(states: list[FundState], changes: list[Change], n
             f'<span style="font-size:10px;color:#7d899d;">{html.escape(codes)} · 天天基金 · {html.escape(reference_label(item))}</span>'
             '</td><td style="padding:8px 0;border-bottom:1px solid #edf0f4;text-align:right;vertical-align:top;white-space:nowrap;">'
             f'<b style="font-size:11px;color:#40516e;">{label}</b><br>'
-            f'<span style="font-size:11px;color:#172844;">定投 {html.escape(item.dca_status)} · {html.escape(display_limit(item))}</span>'
+            f'<span style="font-size:11px;color:#172844;">定投支持 {html.escape(item.dca_status)}<br>天天基金单日申购 {html.escape(display_limit(item))}</span>'
             '</td></tr>'
         )
     summary = f'开放 {counts["open"]} · 限额 {counts["limited"]} · 暂停 {counts["suspended"]} · 待核验 {counts["unknown"]}'
     message = f'''<div style="max-width:680px;margin:0 auto;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;color:#1b2942;">
   <div style="padding:18px;background:#182f5d;color:#fff;border-radius:12px 12px 0 0;">
-    <div style="font-size:17px;font-weight:800;">纳指100 公开渠道实况雷达</div>
-    <div style="margin-top:6px;font-size:11px;color:#c8d7fb;">{now.strftime("%Y年%m月%d日 %H:%M")}（北京时间） · 天天基金</div>
+    <div style="font-size:17px;font-weight:800;">纳指100｜天天基金渠道实况</div>
+    <div style="margin-top:6px;font-size:11px;color:#c8d7fb;">{now.strftime("%Y年%m月%d日 %H:%M")}（北京时间） · 仅代表天天基金</div>
   </div>
   <div style="padding:13px;border:1px solid #e3e8f0;border-top:0;border-radius:0 0 12px 12px;">
     <div style="padding:8px 10px;background:#f5f7fa;border-radius:8px;font-size:12px;color:#516078;">{summary}</div>
     <div style="margin-top:7px;color:#718199;font-size:10px;">公告核验：一致 {reference_counts["consistent"]} · 差异 {reference_counts["conflict"]} · 待核验 {reference_counts["unknown"]}</div>
     {change_block}
     <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin-top:8px;border-collapse:collapse;">{''.join(rows)}</table>
-    <div style="margin-top:10px;color:#8a95a5;font-size:10px;line-height:16px;">主状态为天天基金公开交易页；公告只作交叉核验，不覆盖渠道结论。支付宝、理财通及其他未接入渠道不作推断；暂停时不显示任何可买额度。本消息不构成投资建议。</div>
+    <div style="margin-top:10px;color:#8a95a5;font-size:10px;line-height:16px;">主状态和单日申购上限均来自天天基金；定投支持不等于支付宝/蚂蚁基金等平台的单期定投额度。公告只作交叉核验，不覆盖渠道结论；暂停时不显示任何可买额度。本消息不构成投资建议。</div>
   </div>
 </div>'''
     if len(message) > 18_500:
