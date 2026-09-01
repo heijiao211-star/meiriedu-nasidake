@@ -116,9 +116,11 @@ class SnapshotAndPresentationTests(unittest.TestCase):
         title, body = main.build_message_html(
             [state], [], datetime(2026, 8, 29, 8, 37, tzinfo=main.BEIJING), is_digest=True, initial=False
         )
-        self.assertEqual(title, "纳指100公开渠道｜每日汇总")
+        self.assertEqual(title, "天天基金纳指100｜每日汇总")
         self.assertIn("天天基金", body)
-        self.assertIn("支付宝、理财通及其他未接入渠道不在本卡中推断", body)
+        self.assertIn("天天基金单日申购上限", body)
+        self.assertIn("不是支付宝/蚂蚁基金", body)
+        self.assertIn("该金额不是支付宝/蚂蚁基金、理财通或其他平台", body)
         self.assertIn("测试&lt;script&gt;", body)
         self.assertNotIn("测试<script>", body)
 
